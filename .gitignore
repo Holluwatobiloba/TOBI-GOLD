@@ -1,0 +1,20 @@
+# Python environment files
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Sensitive credentials & secrets
+.env
+*.key
+*.pem
+
+# Database configuration files
+*.db
+*.sqlite3
+
+# Operating system files
+.DS_Store
+Thumbs.db
