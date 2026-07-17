@@ -290,3 +290,110 @@ class DatabaseManager:
         finally:
             if connection:
                 cls._connection_pool.putconn(connection)
+
+    # --- NEW: PROFILE & SETTINGS OPERATIONS FOR MILESTONE 21 ---
+    @classmethod
+    def get_user_settings(cls, telegram_id: int) -> dict:
+        """
+        Retrieves the saved balance and risk percentage for a given user.
+        If the user does not exist or has null columns, returns system defaults.
+        """
+        if not cls._connection_pool:
+            cls.initialize_pool()
+            if not cls._connection_pool:
+                return {"balance": 1000.00, "risk_percent": 1.00}
+
+        query = "SELECT balance, risk_percent FROM users WHERE telegram_id = %s;"
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+            cursor.execute(query, (telegram_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            if result and result[0] is not None and result[1] is not None:
+                return {
+                    "balance": float(result[0]),
+                    "risk_percent": float(result[1])
+                }
+            return {"balance": 1000.00, "risk_percent": 1.00}
+        except Exception as e:
+            logger.error(f"Error fetching settings for user {telegram_id}: {e}")
+            return {"balance": 1000.00, "risk_percent": 1.00}
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)
+
+    @classmethod
+    def update_user_settings(cls, telegram_id: int, balance: float = None, risk_percent: float = None) -> bool:
+        """
+        Updates the user's account balance and/or risk percentage in the database.
+        """
+        if not cls._connection_pool:
+            return False
+
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+            if balance is not None:
+                cursor.execute(
+                    "UPDATE users SET balance = %s WHERE telegram_id = %s;",
+                    (balance, telegram_id)
+                )
+            if risk_percent is not None:
+                cursor.execute(
+                    "UPDATE users SET risk_percent = %s WHERE telegram_id = %s;",
+                    (risk_percent, telegram_id)
+                )
+            connection.commit()
+            cursor.close()
+            logger.info(f"Successfully updated settings for user {telegram_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating settings for user {telegram_id}: {e}")
+            if connection:
+                connection.rollback()
+            return False
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)
+
+    @classmethod
+    def get_latest_signal(cls) -> dict:
+        """
+        Fetches the most recently generated signal from the database.
+        Used to compute dynamic, custom on-the-spot calculations.
+        """
+        if not cls._connection_pool:
+            return None
+
+        query = """
+            SELECT signal_id, pair, direction, entry_price, stop_loss, take_profit, notes 
+            FROM signals 
+            ORDER BY signal_id DESC LIMIT 1;
+        """
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()
+            cursor.close()
+            if result:
+                return {
+                    "signal_id": result[0],
+                    "pair": result[1],
+                    "direction": result[2],
+                    "entry_price": float(result[3]),
+                    "stop_loss": float(result[4]),
+                    "take_profit": float(result[5]),
+                    "notes": result[6]
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching latest signal: {e}")
+            return None
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)

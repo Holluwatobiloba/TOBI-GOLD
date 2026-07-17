@@ -16,6 +16,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from backend.database import DatabaseManager
 from backend.auth import SecurityGatekeeper
 from backend.broadcaster import SignalBroadcaster
+from backend.risk_manager import RiskManager
 
 # Setup logging
 logging.basicConfig(
@@ -57,7 +58,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• **Role:** {role_type}\n"
         f"• **License Tier:** {license_type} Account\n"
         f"• **Status:** System Online\n\n"
-        "Use the buttons below to interact with the gold engine in real time."
+        f"🛠️ **Dynamic Risk Settings Commands:**\n"
+        f"👉 `/setbalance <amount>` - Set your default account balance\n"
+        f"👉 `/setrisk <percent>` - Set your risk percentage per trade\n\n"
+        f"Use the buttons below to interact with the gold engine in real time."
     )
     
     keyboard_layout = [
@@ -77,6 +81,64 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply_markup=reply_markup, 
         parse_mode="Markdown"
     )
+
+# Handle "/setbalance" Command (Saves User-Specific Account Balance)
+async def set_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.message.from_user
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            text="⚠️ **Usage:** `/setbalance <amount>` (e.g., `/setbalance 5000`)",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        balance_val = float(args[0])
+        if balance_val <= 0:
+            await update.message.reply_text("❌ Balance must be a positive number.")
+            return
+
+        success = DatabaseManager.update_user_settings(user.id, balance=balance_val)
+        if success:
+            await update.message.reply_text(
+                text=f"✅ **Balance Updated!**\nYour default trading account balance is now set to **${balance_val:,.2f}**.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update settings in the database.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid format. Please enter a valid decimal number.")
+
+# Handle "/setrisk" Command (Saves User-Specific Trade Risk Threshold)
+async def set_risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.message.from_user
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            text="⚠️ **Usage:** `/setrisk <percentage>` (e.g., `/setrisk 1.5`)",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        risk_val = float(args[0])
+        if risk_val <= 0 or risk_val > 10.0:
+            await update.message.reply_text("❌ Risk must be between **0.01%** and **10.0%** for account safety guidelines.")
+            return
+
+        success = DatabaseManager.update_user_settings(user.id, risk_percent=risk_val)
+        if success:
+            await update.message.reply_text(
+                text=f"✅ **Risk Tier Updated!**\nYour risk per trade is now set to **{risk_val:.2f}%**.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update settings.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid format. Please enter a valid decimal number.")
 
 # Handle Menu Clicks & Record Active User Statistics
 async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -116,7 +178,6 @@ async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_text += "_Review risk management guidelines before entering trades._"
 
     elif user_choice == BUTTON_STATUS:
-        # Fetch actual physical stats dynamically from database
         stats = DatabaseManager.get_signal_statistics()
         win_rate = stats.get("win_rate", 0.0)
         
@@ -130,27 +191,68 @@ async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"• Total Win Ratio: `{win_rate}%` \n"
             f"• Closed Wins: `{stats.get('wins', 0)}` | Losses: `{stats.get('losses', 0)}`"
         )
+
     elif user_choice == BUTTON_RISK:
-        reply_text = (
-            "💵 **Gold Position Risk Calculator**\n\n"
-            "Use this module to calculate lot sizes for XAUUSD trades.\n\n"
-            "• Standard Contract: 1 Lot = 100oz Gold\n"
-            "• Recommended Risk per trade: 1.0% - 2.0% Max\n\n"
-            "_Phase 4 will deploy our fully automated interactive risk engine here._"
-        )
+        settings = DatabaseManager.get_user_settings(user.id)
+        latest_signal = DatabaseManager.get_latest_signal()
+
+        if not latest_signal:
+            reply_text = (
+                "💵 **Gold Position Risk Calculator**\n\n"
+                "⚠️ No active signal exists in the database to calculate risk parameters against.\n\n"
+                "Configure your risk rules first:\n"
+                f"• Current Balance setting: `${settings['balance']:,.2f}`\n"
+                f"• Current Risk setting: `{settings['risk_percent']:.2f}%`"
+            )
+        else:
+            calc = RiskManager.calculate_gold_position_size(
+                balance=settings["balance"],
+                risk_percent=settings["risk_percent"],
+                entry=latest_signal["entry_price"],
+                stop_loss=latest_signal["stop_loss"]
+            )
+
+            if calc.get("status") == "success":
+                lots = calc["recommended_lots"]
+                cash_risk = calc["cash_risk"]
+                pips = calc["pips_at_risk"]
+                
+                reply_text = (
+                    f"🎯 **PERSONAL RISK CALCULATOR**\n"
+                    f"────────────────────\n"
+                    f"✨ **Active Signal:** #{latest_signal['signal_id']} ({latest_signal['direction']})\n"
+                    f"🔹 **Asset:** {latest_signal['pair']} @ `{latest_signal['entry_price']:.2f}`\n"
+                    f"🛑 **Stop Loss:** `{latest_signal['stop_loss']:.2f}` (`{pips} pips` risk)\n\n"
+                    f"⚙️ **Your Profile Metrics:**\n"
+                    f"• Balance: `${settings['balance']:,.2f}`\n"
+                    f"• Risk Setting: `{settings['risk_percent']:.2f}%`\n\n"
+                    f"📊 **CALCULATED OUTCOME:**\n"
+                    f"👉 Recommended Size:  **`{lots:.2f}`** Lots\n"
+                    f"🔥 Total Cash Risk:  **`${cash_risk:.2f}`**\n"
+                    f"────────────────────\n"
+                    f"💡 _Want to alter this outcome? Update parameters via_ `/setbalance` _or_ `/setrisk`."
+                )
+            else:
+                reply_text = "❌ Failed to calculate position parameters. Verify entry coordinates."
+
     elif user_choice == BUTTON_PROFILE:
         profile = DatabaseManager.register_or_get_user(user.id, user.username or "None", user.first_name)
+        settings = DatabaseManager.get_user_settings(user.id)
+        
         username_str = f"@{user.username}" if user.username else "Anonymous"
         role_str = profile.get("role", "guest").capitalize()
         tier_str = profile.get("license_tier", "free").capitalize()
         
         reply_text = (
             f"👤 **User Account Profile**\n\n"
-            f"• Name: {user.first_name}\n"
-            f"• Handle: {username_str}\n"
-            f"• ID: `{user.id}`\n"
-            f"• Status: {role_str} Member\n"
-            f"• License Tier: {tier_str} Tier Account"
+            f"• **Name:** {user.first_name}\n"
+            f"• **Handle:** {username_str}\n"
+            f"• **ID:** `{user.id}`\n"
+            f"• **Status:** {role_str} Member\n"
+            f"• **License Tier:** {tier_str} Tier Account\n\n"
+            f"📊 **PERSONAL RISK METRICS:**\n"
+            f"• **Target Balance:** `${settings['balance']:,.2f}`\n"
+            f"• **Trade Risk Tolerance:** `{settings['risk_percent']:.2f}%`"
         )
     else:
         reply_text = "⚠️ Unknown option selected. Please use the menu buttons below to navigate."
@@ -288,9 +390,6 @@ async def close_signal_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # Handle "/stats" Command (All Users)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Displays core performance statistics dynamically gathered from historical signals.
-    """
     logger.info(f"Stats command requested by user {update.message.from_user.id}")
     
     stats = DatabaseManager.get_signal_statistics()
@@ -336,6 +435,8 @@ def main() -> None:
 
     # Command Handlers
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("setbalance", set_balance_command))
+    app.add_handler(CommandHandler("setrisk", set_risk_command))
     app.add_handler(CommandHandler("publish", publish_signal_command))
     app.add_handler(CommandHandler("close", close_signal_command))
     app.add_handler(CommandHandler("stats", stats_command))
