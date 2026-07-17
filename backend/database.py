@@ -68,12 +68,15 @@ class DatabaseManager:
             if connection:
                 cls._connection_pool.putconn(connection)
 
+    # ==========================================
+    # USER MANAGEMENT QUERIES
+    # ==========================================
+
     @classmethod
     def register_or_get_user(cls, telegram_id: int, username: str, first_name: str) -> dict:
         """
         Checks if a user exists in our database.
         If they do not, it creates a new record for them.
-        Returns the user's database record (role, license_tier, etc.).
         """
         if not cls._connection_pool:
             logger.error("Database pool is uninitialized. Registration failed.")
@@ -84,8 +87,6 @@ class DatabaseManager:
             connection = cls._connection_pool.getconn()
             cursor = connection.cursor()
 
-            # Security Check: Parameterized SQL prevents injection attacks
-            # This query tries to insert a user, but if their ID exists, it does nothing
             query = """
             INSERT INTO users (telegram_id, username, first_name)
             VALUES (%s, %s, %s)
@@ -94,11 +95,8 @@ class DatabaseManager:
             RETURNING telegram_id, username, first_name, role, license_tier;
             """
             
-            # Execute with safe tuple arguments
             cursor.execute(query, (telegram_id, username, first_name))
             user_data = cursor.fetchone()
-            
-            # Save our changes securely
             connection.commit()
             cursor.close()
 
@@ -111,11 +109,10 @@ class DatabaseManager:
                     "license_tier": user_data[4]
                 }
             return {}
-
         except Exception as e:
             logger.error(f"Error registering user {telegram_id}: {e}")
             if connection:
-                connection.rollback() # Rollback changes to keep data clean
+                connection.rollback()
             return {}
         finally:
             if connection:
@@ -146,6 +143,122 @@ class DatabaseManager:
             return True
         except Exception as e:
             logger.error(f"Error updating activity for {telegram_id}: {e}")
+            if connection:
+                connection.rollback()
+            return False
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)
+
+    # ==========================================
+    # SIGNAL MANAGEMENT QUERIES
+    # ==========================================
+
+    @classmethod
+    def create_signal(cls, direction: str, entry: float, sl: float, tp: float, created_by: int, notes: str = None) -> int:
+        """
+        Publishes a new XAUUSD trade signal into the database.
+        Returns the unique signal_id of the generated setup.
+        """
+        if not cls._connection_pool:
+            return 0
+
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+
+            query = """
+            INSERT INTO signals (direction, entry_price, stop_loss, take_profit, created_by, notes)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING signal_id;
+            """
+            
+            cursor.execute(query, (direction.upper(), entry, sl, tp, created_by, notes))
+            signal_id = cursor.fetchone()[0]
+            connection.commit()
+            cursor.close()
+            logger.info(f"Signal successfully created with ID: {signal_id}")
+            return signal_id
+        except Exception as e:
+            logger.error(f"Error publishing signal: {e}")
+            if connection:
+                connection.rollback()
+            return 0
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)
+
+    @classmethod
+    def get_active_signals(cls) -> list[dict]:
+        """
+        Fetches all trading setups currently pending or active.
+        """
+        if not cls._connection_pool:
+            return []
+
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+
+            query = """
+            SELECT signal_id, pair, direction, entry_price, stop_loss, take_profit, status, notes
+            FROM signals
+            WHERE status IN ('pending', 'active')
+            ORDER BY created_at DESC;
+            """
+            
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            signals_list = []
+            for row in rows:
+                signals_list.append({
+                    "signal_id": row[0],
+                    "pair": row[1],
+                    "direction": row[2],
+                    "entry_price": float(row[3]),
+                    "stop_loss": float(row[4]),
+                    "take_profit": float(row[5]),
+                    "status": row[6],
+                    "notes": row[7]
+                })
+            return signals_list
+        except Exception as e:
+            logger.error(f"Error fetching active signals: {e}")
+            return []
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)
+
+    @classmethod
+    def update_signal_status(cls, signal_id: int, new_status: str) -> bool:
+        """
+        Updates a signal's status (e.g. 'tp_hit', 'sl_hit', 'cancelled')
+        """
+        if not cls._connection_pool:
+            return False
+
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+
+            query = """
+            UPDATE signals 
+            SET status = %s, updated_at = CURRENT_TIMESTAMP 
+            WHERE signal_id = %s;
+            """
+            
+            cursor.execute(query, (new_status.lower(), signal_id))
+            connection.commit()
+            cursor.close()
+            logger.info(f"Signal {signal_id} status updated to {new_status}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating status for signal {signal_id}: {e}")
             if connection:
                 connection.rollback()
             return False

@@ -11,18 +11,18 @@ from telegram.ext import (
     filters
 )
 
-# 1. Ensure our backend folder is accessible to Python imports
+# Ensure our backend folder is accessible to Python imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from backend.database import DatabaseManager
 
-# 2. Setup logging
+# Setup logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 3. Load configuration environment variables
+# Load configuration environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -32,7 +32,7 @@ BUTTON_STATUS = "⚙️ System Status"
 BUTTON_RISK = "💵 Risk Calculator"
 BUTTON_PROFILE = "👤 My Profile"
 
-# 4. Handle "/start" Command (Triggers User Registration)
+# Handle "/start" Command (Triggers User Registration)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Greets the user, automatically registers them in the database, 
@@ -45,7 +45,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.info(f"New interaction detected from user {user.id} ({first_name})")
 
     # Attempt to register the user in the database backend
-    # This returns their profile from PostgreSQL (even if they already existed)
     user_profile = DatabaseManager.register_or_get_user(
         telegram_id=user.id,
         username=username,
@@ -53,7 +52,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     # Personalize greeting based on their registration status or license tier
-    license_type = user_profile.get("license_tier", "free").capitalize()
+    license_type = user_profile.get("license_tier", "free").capitalize() if user_profile else "Free"
     
     welcome_text = (
         f"📈 **TOBI-XAUUSD System Active** 📈\n\n"
@@ -81,10 +80,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode="Markdown"
     )
 
-# 5. Handle Menu Clicks & Record Active User Statistics
+# Handle Menu Clicks & Record Active User Statistics
 async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Processes button selections and updates the user's active status.
+    Processes button selections, updates active status, and queries the live DB.
     """
     user = update.message.from_user
     user_choice = update.message.text
@@ -94,13 +93,37 @@ async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE)
     DatabaseManager.update_user_activity(telegram_id=user.id)
 
     if user_choice == BUTTON_SIGNALS:
-        reply_text = (
-            "📊 **XAUUSD Signals Panel**\n\n"
-            "Currently tracking gold volatility sessions...\n"
-            "• Active Signals: None\n"
-            "• Next Session: London Liquidity Open\n\n"
-            "_Phase 2 will integrate live automation signals here._"
-        )
+        # 1. Fetch live active signals from our database pool
+        active_setups = DatabaseManager.get_active_signals()
+
+        if not active_setups:
+            # Fallback message if database is offline or there are no active trades
+            reply_text = (
+                "📊 **XAUUSD Live Signals**\n\n"
+                "📭 **No active setups detected.**\n\n"
+                "The market is currently being scanned. We will broadcast a "
+                "notification the second a high-probability gold setup triggers!"
+            )
+        else:
+            # 2. Build a beautiful, professional trading card for each active signal
+            reply_text = "📊 **TOBI-XAUUSD Active Signals**\n\n"
+            for signal in active_setups:
+                direction_emoji = "🟢 BUY" if "BUY" in signal["direction"] else "🔴 SELL"
+                notes_section = f"\n📝 *Notes:* {signal['notes']}" if signal["notes"] else ""
+                
+                reply_text += (
+                    f"✨ **Signal #{signal['signal_id']}**\n"
+                    f"🔹 **Asset:** {signal['pair']}\n"
+                    f"🔹 **Action:** {direction_emoji}\n"
+                    f"🔹 **Status:** {signal['status'].upper()}\n\n"
+                    f"📍 **Entry Price:** `{signal['entry_price']:.2f}`\n"
+                    f"🛑 **Stop Loss (SL):** `{signal['stop_loss']:.2f}`\n"
+                    f"🎯 **Take Profit (TP):** `{signal['take_profit']:.2f}`\n"
+                    f"{notes_section}\n"
+                    f"────────────────────\n\n"
+                )
+            reply_text += "_Review risk management guidelines before entering trades._"
+
     elif user_choice == BUTTON_STATUS:
         reply_text = (
             "⚙️ **TOBI-XAUUSD System Health**\n\n"
@@ -132,14 +155,13 @@ async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.message.reply_text(text=reply_text, parse_mode="Markdown")
 
-# 6. Run the Resilient Bot
+# Run the Resilient Bot
 def main() -> None:
     if not BOT_TOKEN:
         logger.critical("CRITICAL ERROR: TELEGRAM_BOT_TOKEN is missing!")
         return
 
     # Initialize the Database Connection Pool
-    # (If this fails because your installer is downloading, it logs the error but lets the code run)
     DatabaseManager.initialize_pool()
 
     logger.info("Initializing Integrated TOBI-XAUUSD Control Unit...")
