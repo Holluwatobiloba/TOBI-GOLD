@@ -116,12 +116,19 @@ async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_text += "_Review risk management guidelines before entering trades._"
 
     elif user_choice == BUTTON_STATUS:
+        # Fetch actual physical stats dynamically from database
+        stats = DatabaseManager.get_signal_statistics()
+        win_rate = stats.get("win_rate", 0.0)
+        
         reply_text = (
             "⚙️ **TOBI-XAUUSD System Health**\n\n"
             "• Core Backend: Online\n"
             "• Database Layer: Connected (Verified Live)\n"
-            "• API Handshake: 100% Latency Optimal\n"
-            "• Trading Engines: Idle"
+            "• API Handshake: 100% Latency Optimal\n\n"
+            f"📊 **Historical System Stats:**\n"
+            f"• Verified Signals Processed: `{stats.get('total_signals', 0)}`\n"
+            f"• Total Win Ratio: `{win_rate}%` \n"
+            f"• Closed Wins: `{stats.get('wins', 0)}` | Losses: `{stats.get('losses', 0)}`"
         )
     elif user_choice == BUTTON_RISK:
         reply_text = (
@@ -152,9 +159,6 @@ async def handle_menu_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # Handle "/publish" Command (Admin Only)
 async def publish_signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Syntax: /publish <BUY/SELL> <ENTRY> <SL> <TP> [OPTIONAL NOTES...]
-    """
     user = update.message.from_user
     logger.info(f"Publish command initiated by user: {user.id}")
 
@@ -200,8 +204,6 @@ async def publish_signal_command(update: Update, context: ContextTypes.DEFAULT_T
         if signal_id > 0:
             direction_emoji = "🟢" if "BUY" in direction else "🔴"
             
-            # --- BROADCAST SYSTEM ACTIVE ---
-            # 1. Format the broadcast trade card
             broadcast_message = (
                 f"🚨 **NEW XAUUSD TRADING ALERT** 🚨\n"
                 f"────────────────────\n"
@@ -215,7 +217,6 @@ async def publish_signal_command(update: Update, context: ContextTypes.DEFAULT_T
                 f"────────────────────\n"
                 f"📊 _Use responsible lot sizes and risk management principles._"
             )
-            # 2. Asynchronously broadcast the card to all registered users!
             await SignalBroadcaster.broadcast_message(broadcast_message)
             
         else:
@@ -230,10 +231,6 @@ async def publish_signal_command(update: Update, context: ContextTypes.DEFAULT_T
 
 # Handle "/close" Command (Admin Only)
 async def close_signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Syntax: /close <SIGNAL_ID> <STATUS>
-    Statuses: tp_hit, sl_hit, cancelled, active
-    """
     user = update.message.from_user
     logger.info(f"Close command initiated by admin: {user.id}")
 
@@ -264,7 +261,6 @@ async def close_signal_command(update: Update, context: ContextTypes.DEFAULT_TYP
         if new_status not in valid_statuses:
             raise ValueError(f"Status must be one of: {', '.join(valid_statuses)}")
 
-        # Update the database
         success = DatabaseManager.update_signal_status(signal_id, new_status)
 
         if success:
@@ -283,13 +279,42 @@ async def close_signal_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"────────────────────\n"
                 f"📊 _Historical records have been updated in the database system._"
             )
-            # Broadcast the trade close out to everyone
             await SignalBroadcaster.broadcast_message(update_message)
         else:
             await update.message.reply_text(f"❌ Failed to find or update Signal #{signal_id}.")
 
     except ValueError as err:
         await update.message.reply_text(f"❌ **Invalid Parameters:** {err}", parse_mode="Markdown")
+
+# Handle "/stats" Command (All Users)
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Displays core performance statistics dynamically gathered from historical signals.
+    """
+    logger.info(f"Stats command requested by user {update.message.from_user.id}")
+    
+    stats = DatabaseManager.get_signal_statistics()
+    if not stats:
+        await update.message.reply_text("⚠️ System performance stats are temporarily unavailable.")
+        return
+
+    win_rate = stats.get("win_rate", 0.0)
+    
+    reply_text = (
+        "📈 **TOBI-XAUUSD Engine Performance** 📈\n"
+        "────────────────────────\n\n"
+        f"🏆 **Current Win Rate:** `{win_rate}%`\n\n"
+        f"• **Total Signals:** `{stats.get('total_signals', 0)}` \n"
+        f"• **Active/Running Setups:** `{stats.get('running', 0)}` \n"
+        f"• **Closed Trades:** `{stats.get('closed_trades', 0)}` \n\n"
+        f"🟢 **Closed Wins (TP):** `{stats.get('wins', 0)}` \n"
+        f"🔴 **Closed Losses (SL):** `{stats.get('losses', 0)}` \n"
+        f"⚪ **Cancelled Orders:** `{stats.get('cancelled', 0)}` \n"
+        "────────────────────────\n"
+        "_Calculated mathematically in real-time from our database records._"
+    )
+    
+    await update.message.reply_text(text=reply_text, parse_mode="Markdown")
 
 # Run the Bot
 def main() -> None:
@@ -313,6 +338,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("publish", publish_signal_command))
     app.add_handler(CommandHandler("close", close_signal_command))
+    app.add_handler(CommandHandler("stats", stats_command))
     
     # Message Handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_clicks))

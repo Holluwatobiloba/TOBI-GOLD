@@ -4,113 +4,89 @@ import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
 
-# 1. Setup logging
+# Setup logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 2. Load configurations
+# Load configurations
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 class DatabaseManager:
     """
-    Manages our PostgreSQL database connection pool and core queries.
+    Manages the PostgreSQL Connection Pool and executes all SQL operations
+    securely for users and trade signals.
     """
     _connection_pool = None
 
     @classmethod
-    def initialize_pool(cls) -> bool:
+    def initialize_pool(cls):
         """
-        Creates a connection pool so multiple app queries can run concurrently.
+        Initializes a thread-safe connection pool using the database URL.
         """
         if not DATABASE_URL:
-            logger.error("DATABASE_URL is missing from environment configurations!")
-            return False
-            
-        try:
-            logger.info("Initializing PostgreSQL Connection Pool...")
-            cls._connection_pool = psycopg2.pool.SimpleConnectionPool(
-                minconn=1,
-                maxconn=10,
-                dsn=DATABASE_URL
-            )
-            logger.info("Database Connection Pool successfully created!")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to initialize database pool: {e}")
-            return False
+            logger.critical("DATABASE_URL is missing from environment variables!")
+            return
 
-    @classmethod
-    def test_connection(cls) -> bool:
-        """
-        Attempts to grab a connection from our pool and run a basic diagnostics query.
-        """
-        if not cls._connection_pool:
-            logger.error("Cannot test connection. Pool is not initialized.")
-            return False
-
-        connection = None
-        try:
-            connection = cls._connection_pool.getconn()
-            cursor = connection.cursor()
-            cursor.execute("SELECT version();")
-            db_version = cursor.fetchone()
-            logger.info(f"Database handshake successful! Engine Version: {db_version[0]}")
-            cursor.close()
-            return True
-        except Exception as e:
-            logger.error(f"Database query test failed: {e}")
-            return False
-        finally:
-            if connection:
-                cls._connection_pool.putconn(connection)
-
-    # ==========================================
-    # USER MANAGEMENT QUERIES
-    # ==========================================
+        if cls._connection_pool is None:
+            try:
+                logger.info("Initializing PostgreSQL Connection Pool...")
+                cls._connection_pool = pool.ThreadedConnectionPool(
+                    minconn=2,
+                    maxconn=10,
+                    dsn=DATABASE_URL
+                )
+                logger.info("PostgreSQL Connection Pool initialized successfully!")
+            except Exception as e:
+                logger.error(f"Failed to initialize database pool: {e}")
+                cls._connection_pool = None
 
     @classmethod
     def register_or_get_user(cls, telegram_id: int, username: str, first_name: str) -> dict:
         """
-        Checks if a user exists in our database.
-        If they do not, it creates a new record for them.
+        Registers a new user in the database if they do not exist.
+        If they exist, returns their profile.
         """
         if not cls._connection_pool:
-            logger.error("Database pool is uninitialized. Registration failed.")
-            return {}
+            cls.initialize_pool()
+            if not cls._connection_pool:
+                logger.error("Pool uninitialized. Registration failed.")
+                return {}
 
         connection = None
         try:
             connection = cls._connection_pool.getconn()
             cursor = connection.cursor()
 
-            query = """
+            # Insert new user or do nothing if they already exist
+            insert_query = """
             INSERT INTO users (telegram_id, username, first_name)
             VALUES (%s, %s, %s)
             ON CONFLICT (telegram_id) DO UPDATE 
             SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
-            RETURNING telegram_id, username, first_name, role, license_tier;
+            RETURNING telegram_id, username, first_name, role, license_tier, registered_at;
             """
             
-            cursor.execute(query, (telegram_id, username, first_name))
-            user_data = cursor.fetchone()
+            cursor.execute(insert_query, (telegram_id, username, first_name))
+            result = cursor.fetchone()
             connection.commit()
             cursor.close()
 
-            if user_data:
+            if result:
                 return {
-                    "telegram_id": user_data[0],
-                    "username": user_data[1],
-                    "first_name": user_data[2],
-                    "role": user_data[3],
-                    "license_tier": user_data[4]
+                    "telegram_id": result[0],
+                    "username": result[1],
+                    "first_name": result[2],
+                    "role": result[3],
+                    "license_tier": result[4],
+                    "registered_at": result[5]
                 }
             return {}
         except Exception as e:
-            logger.error(f"Error registering user {telegram_id}: {e}")
+            logger.error(f"Database error during user registration: {e}")
             if connection:
                 connection.rollback()
             return {}
@@ -121,7 +97,7 @@ class DatabaseManager:
     @classmethod
     def update_user_activity(cls, telegram_id: int) -> bool:
         """
-        Updates the last active timestamp of a user in the database.
+        Updates the last_active timestamp for a user.
         """
         if not cls._connection_pool:
             return False
@@ -130,19 +106,18 @@ class DatabaseManager:
         try:
             connection = cls._connection_pool.getconn()
             cursor = connection.cursor()
-
+            
             query = """
             UPDATE users 
-            SET last_active_at = CURRENT_TIMESTAMP 
+            SET last_active = CURRENT_TIMESTAMP 
             WHERE telegram_id = %s;
             """
-            
             cursor.execute(query, (telegram_id,))
             connection.commit()
             cursor.close()
             return True
         except Exception as e:
-            logger.error(f"Error updating activity for {telegram_id}: {e}")
+            logger.error(f"Failed to update user activity: {e}")
             if connection:
                 connection.rollback()
             return False
@@ -150,15 +125,11 @@ class DatabaseManager:
             if connection:
                 cls._connection_pool.putconn(connection)
 
-    # ==========================================
-    # SIGNAL MANAGEMENT QUERIES
-    # ==========================================
-
     @classmethod
     def create_signal(cls, direction: str, entry: float, sl: float, tp: float, created_by: int, notes: str = None) -> int:
         """
-        Publishes a new XAUUSD trade signal into the database.
-        Returns the unique signal_id of the generated setup.
+        Inserts a new gold trading signal into the signals table.
+        Returns the generated signal_id.
         """
         if not cls._connection_pool:
             return 0
@@ -169,19 +140,18 @@ class DatabaseManager:
             cursor = connection.cursor()
 
             query = """
-            INSERT INTO signals (direction, entry_price, stop_loss, take_profit, created_by, notes)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO signals (pair, direction, entry_price, stop_loss, take_profit, created_by, notes)
+            VALUES ('XAUUSD', %s, %s, %s, %s, %s, %s)
             RETURNING signal_id;
             """
             
-            cursor.execute(query, (direction.upper(), entry, sl, tp, created_by, notes))
+            cursor.execute(query, (direction, entry, sl, tp, created_by, notes))
             signal_id = cursor.fetchone()[0]
             connection.commit()
             cursor.close()
-            logger.info(f"Signal successfully created with ID: {signal_id}")
             return signal_id
         except Exception as e:
-            logger.error(f"Error publishing signal: {e}")
+            logger.error(f"Failed to create trade signal: {e}")
             if connection:
                 connection.rollback()
             return 0
@@ -190,9 +160,9 @@ class DatabaseManager:
                 cls._connection_pool.putconn(connection)
 
     @classmethod
-    def get_active_signals(cls) -> list[dict]:
+    def get_active_signals(cls) -> list:
         """
-        Fetches all trading setups currently pending or active.
+        Retrieves all currently active setups from the database.
         """
         if not cls._connection_pool:
             return []
@@ -205,17 +175,17 @@ class DatabaseManager:
             query = """
             SELECT signal_id, pair, direction, entry_price, stop_loss, take_profit, status, notes
             FROM signals
-            WHERE status IN ('pending', 'active')
-            ORDER BY created_at DESC;
+            WHERE status = 'active'
+            ORDER BY signal_id DESC;
             """
             
             cursor.execute(query)
             rows = cursor.fetchall()
             cursor.close()
 
-            signals_list = []
+            signals = []
             for row in rows:
-                signals_list.append({
+                signals.append({
                     "signal_id": row[0],
                     "pair": row[1],
                     "direction": row[2],
@@ -225,18 +195,18 @@ class DatabaseManager:
                     "status": row[6],
                     "notes": row[7]
                 })
-            return signals_list
+            return signals
         except Exception as e:
-            logger.error(f"Error fetching active signals: {e}")
+            logger.error(f"Failed to query active signals: {e}")
             return []
         finally:
             if connection:
                 cls._connection_pool.putconn(connection)
 
     @classmethod
-    def update_signal_status(cls, signal_id: int, new_status: str) -> bool:
+    def update_signal_status(cls, signal_id: int, status: str) -> bool:
         """
-        Updates a signal's status (e.g. 'tp_hit', 'sl_hit', 'cancelled')
+        Updates the status of a signal (e.g. tp_hit, sl_hit, cancelled).
         """
         if not cls._connection_pool:
             return False
@@ -247,18 +217,20 @@ class DatabaseManager:
             cursor = connection.cursor()
 
             query = """
-            UPDATE signals 
-            SET status = %s, updated_at = CURRENT_TIMESTAMP 
+            UPDATE signals
+            SET status = %s, closed_at = CURRENT_TIMESTAMP
             WHERE signal_id = %s;
             """
             
-            cursor.execute(query, (new_status.lower(), signal_id))
+            cursor.execute(query, (status, signal_id))
             connection.commit()
+            
+            # Check if any row was actually updated
+            row_count = cursor.rowcount
             cursor.close()
-            logger.info(f"Signal {signal_id} status updated to {new_status}")
-            return True
+            return row_count > 0
         except Exception as e:
-            logger.error(f"Error updating status for signal {signal_id}: {e}")
+            logger.error(f"Failed to update signal status: {e}")
             if connection:
                 connection.rollback()
             return False
@@ -266,16 +238,55 @@ class DatabaseManager:
             if connection:
                 cls._connection_pool.putconn(connection)
 
-def run_diagnostics():
-    """
-    Independent script runner to check connection state.
-    """
-    logger.info("--- Starting TOBI-XAUUSD Database Diagnostics ---")
-    initialized = DatabaseManager.initialize_pool()
-    if initialized:
-        DatabaseManager.test_connection()
-    else:
-        logger.error("Database initialization aborted due to pool failures.")
+    @classmethod
+    def get_signal_statistics(cls) -> dict:
+        """
+        Aggregates metrics from the signals table to compute historical performance.
+        Returns a dictionary of total trades, wins, losses, and calculated win rate.
+        """
+        if not cls._connection_pool:
+            logger.error("Database pool is uninitialized. Statistics aggregation failed.")
+            return {}
 
-if __name__ == "__main__":
-    run_diagnostics()
+        connection = None
+        try:
+            connection = cls._connection_pool.getconn()
+            cursor = connection.cursor()
+
+            query = """
+            SELECT 
+                COUNT(*) AS total_signals,
+                COUNT(CASE WHEN status = 'tp_hit' THEN 1 END) AS total_wins,
+                COUNT(CASE WHEN status = 'sl_hit' THEN 1 END) AS total_losses,
+                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) AS total_cancelled,
+                COUNT(CASE WHEN status IN ('pending', 'active') THEN 1 END) AS total_running
+            FROM signals;
+            """
+            
+            cursor.execute(query)
+            result = cursor.fetchone()
+            cursor.close()
+
+            if result:
+                total, wins, losses, cancelled, running = result
+                closed_trades = wins + losses
+                
+                # Calculate dynamic win rate (avoid division by zero if no closed trades yet)
+                win_rate = (wins / closed_trades * 100) if closed_trades > 0 else 0.0
+
+                return {
+                    "total_signals": total,
+                    "wins": wins,
+                    "losses": losses,
+                    "cancelled": cancelled,
+                    "running": running,
+                    "closed_trades": closed_trades,
+                    "win_rate": round(win_rate, 1)
+                }
+            return {}
+        except Exception as e:
+            logger.error(f"Error computing performance metrics: {e}")
+            return {}
+        finally:
+            if connection:
+                cls._connection_pool.putconn(connection)
