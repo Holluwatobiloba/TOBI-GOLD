@@ -1,6 +1,8 @@
 import os
 import sys
 import logging
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -11,6 +13,7 @@ from backend.database import DatabaseManager
 from backend.broadcaster import SignalBroadcaster
 from backend.market_watcher import MarketWatcher
 from backend.risk_manager import RiskManager  # NEW: Integrated Risk Manager
+from backend.engine import StrategyEngine      # NEW: Integrated Strategy Engine
 
 # Setup logging
 logging.basicConfig(
@@ -22,16 +25,36 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 API_SECRET_TOKEN = os.getenv("API_SECRET_TOKEN", "super_secure_system_token_2026")
 
+
+# --- NEW: LIFESPAN MANAGER FOR BACKGROUND TASKS ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup Events:
+    logger.info("Initializing database pool...")
+    DatabaseManager.initialize_pool()
+    
+    # Spin up our autonomous "Best Mode" Strategy Engine Loop
+    logger.info("Starting autonomous Strategy Engine background loop...")
+    engine = StrategyEngine()
+    engine_task = asyncio.create_task(engine.start_engine_loop())
+    
+    yield  # FastAPI runs here...
+    
+    # Shutdown Events:
+    logger.info("Canceling Strategy Engine background loop...")
+    engine_task.cancel()
+    try:
+        await engine_task
+    except asyncio.CancelledError:
+        logger.info("Strategy Engine loop stopped cleanly.")
+
+
 app = FastAPI(
     title="TOBI-XAUUSD Webhook Ingestor",
-    version="1.2.0",
-    description="Secure API to ingest validated market signals with dynamic risk calculations."
+    version="1.3.0",  # Bumped version for Strategy Engine integration
+    description="Secure API to ingest validated market signals with dynamic risk calculations and autonomous logic.",
+    lifespan=lifespan
 )
-
-# Initialize database pool on startup
-@app.on_event("startup")
-def startup_event():
-    DatabaseManager.initialize_pool()
 
 class SignalPayload(BaseModel):
     direction: str = Field(..., description="BUY, SELL, BUY_LIMIT, or SELL_LIMIT")

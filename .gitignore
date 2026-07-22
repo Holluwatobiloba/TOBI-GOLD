@@ -18,3 +18,12 @@ env/
 # Operating system files
 .DS_Store
 Thumbs.db
+# Logs
+*.log
+
+# Docker data & volumes
+docker-data/
+
+# Root-level stray files/artifacts
+*.tar.gz
+*.whl
